@@ -8,6 +8,9 @@ import threading
 
 def emojis(str=""):
     """Returns an emoji-safe version of a string, stripped of emojis on Windows platforms."""
+    #! 在 Windows 平台上，表情符号（emoji）是使用 Unicode 编码的，而 Windows 的命令行界面不支持显示 Unicode 字符。因此，如果直接输出包含表情符号的字符串，可能会导致乱码或无法显示。
+    #! 在 Windows 平台上，去除字符串中的表情符号（emoji），返回一个 ASCII 编码的字符串；
+    #! 在 Linux 和 macOS 平台上，返回原始字符串
     return str.encode().decode("ascii", "ignore") if platform.system() == "Windows" else str
 
 

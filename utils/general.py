@@ -96,6 +96,7 @@ def is_jupyter():
         bool: True if running inside a Jupyter Notebook, False otherwise.
     """
     with contextlib.suppress(Exception):
+        #! 判断是否在 ipython 环境中
         from IPython import get_ipython
 
         return get_ipython() is not None
@@ -362,7 +363,7 @@ def git_describe(path=ROOT):
     Example output is 'fv5.0-5-g3e25f1e'. See https://git-scm.com/docs/git-describe.
     """
     try:
-        assert (Path(path) / ".git").is_dir()
+        assert (Path(path) / ".git").is_dir() #! path 得是 git 的 working copy
         return check_output(f"git -C {path} describe --tags --long --always", shell=True).decode()[:-1]
     except Exception:
         return ""
@@ -435,13 +436,18 @@ def check_version(current="0.0.0", minimum="0.0.0", name="version ", pinned=Fals
 
 
 def check_img_size(imgsz, s=32, floor=0):
-    """Adjusts image size to be divisible by stride `s`, supports int or list/tuple input, returns adjusted size."""
+    """向上s对齐，然后不小于floor
+
+    Adjusts image size to be divisible by stride `s`, supports int or list/tuple input, returns adjusted size."""
     if isinstance(imgsz, int):  # integer i.e. img_size=640
+        #! 向上s对齐，然后不小于floor
         new_size = max(make_divisible(imgsz, int(s)), floor)
     else:  # list i.e. img_size=[640, 480]
         imgsz = list(imgsz)  # convert to list if tuple
         new_size = [max(make_divisible(x, int(s)), floor) for x in imgsz]
+        #! 列表操作，对每个元素都 向上s对齐，然后不小于floor
     if new_size != imgsz:
+        #! 若 imgsz 不是 s 的整数倍，则会报 warning
         LOGGER.warning(f"WARNING ⚠️ --img-size {imgsz} must be multiple of max stride {s}, updating to {new_size}")
     return new_size
 
@@ -467,7 +473,7 @@ def check_suffix(file="yolov5s.pt", suffix=(".pt",), msg=""):
     if file and suffix:
         if isinstance(suffix, str):
             suffix = [suffix]
-        for f in file if isinstance(file, (list, tuple)) else [file]:
+        for f in file if isinstance(file, (list, tuple)) else [file]: #! 列表化操作
             s = Path(f).suffix.lower()  # file suffix
             if len(s):
                 assert s in suffix, f"{msg}{f} acceptable suffix is {suffix}"
@@ -481,31 +487,34 @@ def check_yaml(file, suffix=(".yaml", ".yml")):
 def check_file(file, suffix=""):
     """Searches/downloads a file, checks its suffix (if provided), and returns the file path."""
     check_suffix(file, suffix)  # optional
+    #! 使用 assert 检查文件路径（列表） file 的后缀是否在后缀列表 suffix 中
     file = str(file)  # convert to str()
     if os.path.isfile(file) or not file:  # exists
-        return file
+        return file #! 文件存在 或者 file 为空
     elif file.startswith(("http:/", "https:/")):  # download
         url = file  # warning: Pathlib turns :// -> :/
         file = Path(urllib.parse.unquote(file).split("?")[0]).name  # '%2F' to '/', split https://url.com/file.txt?auth
-        if os.path.isfile(file):
+        #! urllib.parse.unquote(file) 解码 URL
+        #! 取 ? 前的部分，然后获取最后的 / 后的 name
+        if os.path.isfile(file): #! 这里为 True 的话，file 应在当前目录下
             LOGGER.info(f"Found {url} locally at {file}")  # file already exists
         else:
             LOGGER.info(f"Downloading {url} to {file}...")
             torch.hub.download_url_to_file(url, file)
-            assert Path(file).exists() and Path(file).stat().st_size > 0, f"File download failed: {url}"  # check
+            assert Path(file).exists() and Path(file).stat().st_size > 0, f"File download failed: {url}"  #! 使用 assert 检查文件已下载且文件非空
         return file
     elif file.startswith("clearml://"):  # ClearML Dataset ID
         assert "clearml" in sys.modules, (
             "ClearML is not installed, so cannot use ClearML dataset. Try running 'pip install clearml'."
         )
         return file
-    else:  # search
+    else:  #! 文件不存在但 file 非空，不是 http 开头，也不是 clearml 开头
         files = []
         for d in "data", "models", "utils":  # search directories
             files.extend(glob.glob(str(ROOT / d / "**" / file), recursive=True))  # find file
         assert len(files), f"File not found: {file}"  # assert file was found
         assert len(files) == 1, f"Multiple files match '{file}', specify exact path: {files}"  # assert unique
-        return files[0]  # return file
+        return files[0]  #! 返回找到的结果中的第一个
 
 
 def check_font(font=FONT, progress=False):
@@ -523,35 +532,50 @@ def check_dataset(data, autodownload=True):
     # Download (optional)
     extract_dir = ""
     if isinstance(data, (str, Path)) and (is_zipfile(data) or is_tarfile(data)):
+        #! 如果 data 是字符串或 Path，且是 zip 或 tar 文件
+        #! 下载到当前工程目录所在目录下的 datasets 文件夹中，以 Path(data).stem 命名，自动解压
         download(data, dir=f"{DATASETS_DIR}/{Path(data).stem}", unzip=True, delete=False, curl=False, threads=1)
         data = next((DATASETS_DIR / Path(data).stem).rglob("*.yaml"))
+        #! 在 DATASETS_DIR / Path(data).stem 路径下递归查找所有以 .yaml 结尾的文件
+        #! next: 返回找到的第一个文件
         extract_dir, autodownload = data.parent, False
 
     # Read yaml (optional)
     if isinstance(data, (str, Path)):
+        #! 如果 data 只是字符串或 Path，则默认为 yaml 文件
+        #! 使用 yaml.safe_load 加载 yaml 文件，返回一个字典
         data = yaml_load(data)  # dictionary
 
     # Checks
     for k in "train", "val", "names":
+        #! 若 data 中不存在 train/val/names 字段，则报错
         assert k in data, emojis(f"data.yaml '{k}:' field missing ❌")
     if isinstance(data["names"], (list, tuple)):  # old array format
+        #! 如果 data["names"] 是列表或元组，则将其转换为字典
         data["names"] = dict(enumerate(data["names"]))  # convert to dict
     assert all(isinstance(k, int) for k in data["names"].keys()), "data.yaml names keys must be integers, i.e. 2: car"
-    data["nc"] = len(data["names"])
+    #! 如果 data["names"] 的 keys 不全是整数，则报错
+    data["nc"] = len(data["names"]) #! 统计 data["names"] 的 keys 的个数
 
     # Resolve paths
-    path = Path(extract_dir or data.get("path") or "")  # optional 'path' default to '.'
+    path = Path(extract_dir or data.get("path") or "")
+    #! 若 extract_dir 不为空，则 path = extract_dir
+    #! 若 extract_dir 为空，且 data 中存在 path 字段，则 path = data["path"]
+    #! 若 extract_dir 以及 data["path"] 都为空，则 path = ""，默认为当前目录
     if not path.is_absolute():
         path = (ROOT / path).resolve()
+        #! 如果 path 不是绝对路径，则将其转换为绝对路径
         data["path"] = path  # download scripts
     for k in "train", "val", "test":
         if data.get(k):  # prepend path
             if isinstance(data[k], str):
                 x = (path / data[k]).resolve()
                 if not x.exists() and data[k].startswith("../"):
+                    #! 去掉 "../" 后，再合成绝对路径
                     x = (path / data[k][3:]).resolve()
                 data[k] = str(x)
             else:
+                #! 默认此时 data[k] 是列表
                 data[k] = [str((path / x).resolve()) for x in data[k]]
 
     # Parse yaml
@@ -560,7 +584,9 @@ def check_dataset(data, autodownload=True):
         val = [Path(x).resolve() for x in (val if isinstance(val, list) else [val])]  # val path
         if not all(x.exists() for x in val):
             LOGGER.info("\nDataset not found ⚠️, missing paths %s" % [str(x) for x in val if not x.exists()])
+            #! data["download"] 可能是 URL，可能是 bash 脚本，可能是 python 脚本
             if not s or not autodownload:
+                #! 如果 s 为空或 autodownload 为 False，则报错
                 raise Exception("Dataset not found ❌")
             t = time.time()
             if s.startswith("http") and s.endswith(".zip"):  # URL
@@ -569,6 +595,7 @@ def check_dataset(data, autodownload=True):
                 torch.hub.download_url_to_file(s, f)
                 Path(DATASETS_DIR).mkdir(parents=True, exist_ok=True)  # create root
                 unzip_file(f, path=DATASETS_DIR)  # unzip
+                #! 将下载的 zip 文件解压到 DATASETS_DIR 路径下
                 Path(f).unlink()  # remove zip
                 r = None  # success
             elif s.startswith("bash "):  # bash script
@@ -576,6 +603,7 @@ def check_dataset(data, autodownload=True):
                 r = subprocess.run(s, shell=True)
             else:  # python script
                 r = exec(s, {"yaml": data})  # return None
+                #! 执行 s python 脚本，传递 {"yaml": data} 作为参数
             dt = f"({round(time.time() - t, 1)}s)"
             s = f"success ✅ {dt}, saved to {colorstr('bold', DATASETS_DIR)}" if r in (0, None) else f"failure {dt} ❌"
             LOGGER.info(f"Dataset download {s}")
@@ -656,6 +684,7 @@ def download(url, dir=".", unzip=True, delete=True, curl=False, threads=1, retry
         """Downloads a single file from `url` to `dir`, with retry support and optional curl fallback."""
         success = True
         if os.path.isfile(url):
+            #! 若文件存在，则直接使用该路径
             f = Path(url)  # filename
         else:  # does not exist
             f = dir / Path(url).name
@@ -1032,9 +1061,9 @@ def non_max_suppression(
 
     device = prediction.device
     mps = "mps" in device.type  # Apple MPS
-    if mps:  # MPS not fully supported yet, convert tensors to CPU before NMS
+    if mps:  #! MPS not fully supported yet, convert tensors to CPU before NMS
         prediction = prediction.cpu()
-    bs = prediction.shape[0]  # batch size
+    bs = prediction.shape[0]  #! batch size
     nc = prediction.shape[2] - nm - 5  # number of classes
     xc = prediction[..., 4] > conf_thres  # candidates
 

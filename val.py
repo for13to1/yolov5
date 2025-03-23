@@ -186,7 +186,7 @@ def process_batch(detections, labels, iouv):
 
 @smart_inference_mode()
 def run(
-    data,
+    data, #! Path to a dataset YAML file or a dataset dictionary
     weights=None,  # model.pt path(s)
     batch_size=32,  # batch size
     imgsz=640,  # inference size (pixels)
@@ -255,52 +255,81 @@ def run(
     """
     # Initialize/load model and set device
     training = model is not None
+    #! 若 model 存在，则 training 被设置为 True；若 model 不存在，则 training 被设置为 False：什么意思？
     if training:  # called by train.py
         device, pt, jit, engine = next(model.parameters()).device, True, False, False  # get model device, PyTorch model
         half &= device.type != "cpu"  # half precision only supported on CUDA
         model.half() if half else model.float()
     else:  # called directly
         device = select_device(device, batch_size=batch_size)
+        #? batch_size 指的是一次处理的数据样本数量。例如，如果 batch_size 为 32，那么模型会一次处理 32 个数据样本，然后更新权重，接着再处理下一个批量的 32 个数据样本。
+        #! 返回值是 torch.device 对象，表示计算设备的类型，例如 "cpu" 或 "cuda:0"。
 
         # Directories
+        #! project 默认为 ROOT / "runs/val"
+        #! name 默认为 exp
         save_dir = increment_path(Path(project) / name, exist_ok=exist_ok)  # increment run
+        #! 若 save_txt 为 True，则 save_dir / "labels" 会被创建
         (save_dir / "labels" if save_txt else save_dir).mkdir(parents=True, exist_ok=True)  # make dir
 
         # Load model
         model = DetectMultiBackend(weights, device=device, dnn=dnn, data=data, fp16=half)
         stride, pt, jit, engine = model.stride, model.pt, model.jit, model.engine
+        #? stride: 如果 stride 为 2，那么卷积核将每次移动 2 个像素。这样可以减少输出特征图的大小，同时保留输入数据的重要信息。
+        #! pt: PyTorch model
+        #! jit: TorchScript model
+        #! engine: TensorRT engine
         imgsz = check_img_size(imgsz, s=stride)  # check image size
         half = model.fp16  # FP16 supported on limited backends with CUDA
+        #! model.fp16 表示模型是否支持 FP16 计算。如果模型支持 FP16，则 half 变量将被设置为 True，否则将被设置为 False
+        #! FP16 计算仅在某些后端（backend）上支持，并且需要 CUDA（一种 NVIDIA 的并行计算平台）。
         if engine:
+            #? 优化引擎（如 TensorRT）：batch_size 需在导出时预先设定，推理时不可动态修改
             batch_size = model.batch_size
         else:
-            device = model.device
+            device = model.device #! 这里返回的可能是什么类型？
             if not (pt or jit):
+                #! 若不支持 PyTorch 或 TorchScript，则将 batch_size 设置为 1
                 batch_size = 1  # export.py models default to batch-size 1
                 LOGGER.info(f"Forcing --batch-size 1 square inference (1,3,{imgsz},{imgsz}) for non-PyTorch models")
 
         # Data
-        data = check_dataset(data)  # check
+        data = check_dataset(data)  #! 返回的是字典
 
     # Configure
-    model.eval()
+    model.eval() #! 将模型切换到评估模式（evaluation mode）
+    #? 在 PyTorch 中，模型有两种模式：训练模式（training mode）和评估模式（evaluation mode）。训练模式用于训练模型，评估模式用于测试和评估模型。当模型处于训练模式时，它会计算梯度并更新权重。然而，在评估模式下，模型不会计算梯度，也不会更新权重。
     cuda = device.type != "cpu"
+    #? https://pytorch.org/docs/stable/tensor_attributes.html#torch-device
+    #! 不是 cpu 的不一定是 cuda
     is_coco = isinstance(data.get("val"), str) and data["val"].endswith(f"coco{os.sep}val2017.txt")  # COCO dataset
+    #! data["val"] 是字符串且以 coco/val2017.txt 结尾，则 is_coco 为 True
     nc = 1 if single_cls else int(data["nc"])  # number of classes
+    #! 如果 single_cls 为 True，则 nc 为 1，否则 nc 为 data["nc"] 的值
     iouv = torch.linspace(0.5, 0.95, 10, device=device)  # iou vector for mAP@0.5:0.95
-    niou = iouv.numel()
+    #! [0.5000, 0.5500, 0.6000, 0.6500, 0.7000, 0.7500, 0.8000, 0.8500, 0.9000, 0.9500]
+    niou = iouv.numel() # 10
 
     # Dataloader
     if not training:
         if pt and not single_cls:  # check --weights are trained on --data
-            ncm = model.model.nc
+            #! 支持 PyTorch，且不是单类模型
+            ncm = model.model.nc #! 使用模型的 nc 值，即类别数
             assert ncm == nc, (
                 f"{weights} ({ncm} classes) trained on different --data than what you passed ({nc} "
                 f"classes). Pass correct combination of --weights and --data that are trained together."
             )
         model.warmup(imgsz=(1 if pt else batch_size, 3, imgsz, imgsz))  # warmup
+        #! 若 pt 为 True，则 imgsz 为 (1, 3, imgsz, imgsz)，否则 imgsz 为 (batch_size, 3, imgsz, imgsz)
         pad, rect = (0.0, False) if task == "speed" else (0.5, pt)  # square inference for benchmarks
-        task = task if task in ("train", "val", "test") else "val"  # path to train/val/test images
+        #! 如果任务类型为 "speed"，则：
+        #! 填充（pad）参数为 0.0，这意味着不进行填充。
+        #! 矩形（rect）参数为 False，这意味着不使用矩形。
+        #! 如果任务类型不是 "speed"，则：
+        #! 填充（pad）参数为 0.5，这意味着进行 50% 的填充。
+        #! 矩形（rect）参数为 pt，这意味着使用矩形，具体取决于 pt 的值
+        task = task if task in ("train", "val", "speed") else "val"  # path to train/val/test images
+        #! 这里返回的是 (dataloader, dataset)
         dataloader = create_dataloader(
             data[task],
             imgsz,
@@ -315,16 +344,24 @@ def run(
 
     seen = 0
     confusion_matrix = ConfusionMatrix(nc=nc)
-    names = model.names if hasattr(model, "names") else model.module.names  # get class names
+
+    # get class names
+    names = model.names if hasattr(model, "names") else model.module.names
+    #? 兼容两种常见场景：
+    #? 单设备（如单 GPU 或 CPU）模型：直接访问 model.names。
+    #? 多设备（如多 GPU DataParallel 或分布式 DistributedDataParallel）模型：通过 model.module.names 访问。
     if isinstance(names, (list, tuple)):  # old format
         names = dict(enumerate(names))
+
     class_map = coco80_to_coco91_class() if is_coco else list(range(1000))
+
     s = ("%22s" + "%11s" * 6) % ("Class", "Images", "Instances", "P", "R", "mAP50", "mAP50-95")
     tp, fp, p, r, f1, mp, mr, map50, ap50, map = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
     dt = Profile(device=device), Profile(device=device), Profile(device=device)  # profiling times
     loss = torch.zeros(3, device=device)
     jdict, stats, ap, ap_class = [], [], [], []
     callbacks.run("on_val_start")
+
     pbar = tqdm(dataloader, desc=s, bar_format=TQDM_BAR_FORMAT)  # progress bar
     for batch_i, (im, targets, paths, shapes) in enumerate(pbar):
         callbacks.run("on_val_batch_start")
@@ -523,7 +560,7 @@ def parse_opt():
     parser.add_argument("--iou-thres", type=float, default=0.6, help="NMS IoU threshold")
     parser.add_argument("--max-det", type=int, default=300, help="maximum detections per image")
     parser.add_argument("--task", default="val", help="train, val, test, speed or study")
-    parser.add_argument("--device", default="", help="cuda device, i.e. 0 or 0,1,2,3 or cpu")
+    parser.add_argument("--device", default="mps", help="cuda device, i.e. 0 or 0,1,2,3 or cpu")
     parser.add_argument("--workers", type=int, default=8, help="max dataloader workers (per RANK in DDP mode)")
     parser.add_argument("--single-cls", action="store_true", help="treat as single-class dataset")
     parser.add_argument("--augment", action="store_true", help="augmented inference")

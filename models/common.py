@@ -460,7 +460,11 @@ class DetectMultiBackend(nn.Module):
     """YOLOv5 MultiBackend class for inference on various backends including PyTorch, ONNX, TensorRT, and more."""
 
     def __init__(self, weights="yolov5s.pt", device=torch.device("cpu"), dnn=False, data=None, fp16=False, fuse=True):
-        """Initializes DetectMultiBackend with support for various inference backends, including PyTorch and ONNX."""
+        """
+        传入的 weights 是 模型文件路径 或 triton URL
+
+        Initializes DetectMultiBackend with support for various inference backends, including PyTorch and ONNX.
+        """
         #   PyTorch:              weights = *.pt
         #   TorchScript:                    *.torchscript
         #   ONNX Runtime:                   *.onnx
@@ -476,18 +480,25 @@ class DetectMultiBackend(nn.Module):
         from models.experimental import attempt_download, attempt_load  # scoped to avoid circular import
 
         super().__init__()
-        w = str(weights[0] if isinstance(weights, list) else weights)
-        pt, jit, onnx, xml, engine, coreml, saved_model, pb, tflite, edgetpu, tfjs, paddle, triton = self._model_type(w)
+        w = str(weights[0] if isinstance(weights, list) else weights) #! 使用第一个权重文件
+        pt, jit, onnx, xml, engine, coreml, saved_model, pb, tflite, edgetpu, tfjs, paddle, triton = self._model_type(w) #! 各类模型的判断标志
         fp16 &= pt or jit or onnx or engine or triton  # FP16
+        #! 等效于 fp16 = fp16 and (pt or jit or onnx or engine or triton)
+        #! 若输入的 fp16 为 True, pt, jit, onnx, engine, triton 中有一个为 True, 则 fp16 为 True: 也就是只有这些模型支持 fp16
         nhwc = coreml or saved_model or pb or tflite or edgetpu  # BHWC formats (vs torch BCWH)
+        #! 若输入模型为 CoreML, TensorFlow SavedModel, TensorFlow GraphDef, TensorFlow Lite, TensorFlow Edge TPU 中的一个, 则 nhwc 为 True
+        #! bhwc 中的 b 表示 batch size, h 表示 height, w 表示 width, c 表示 channel
+        #! bcwh 中的 b 表示 batch size, c 表示 channel, h 表示 height, w 表示 width
         stride = 32  # default stride
         cuda = torch.cuda.is_available() and device.type != "cpu"  # use CUDA
         if not (pt or triton):
+            #! 若不是 PyTorch 模型或 Triton 模型，则尝试下载权重文件
             w = attempt_download(w)  # download if not local
 
         if pt:  # PyTorch
             model = attempt_load(weights if isinstance(weights, list) else w, device=device, inplace=True, fuse=fuse)
             stride = max(int(model.stride.max()), 32)  # model stride
+            #! 为什么不超过 32 ?
             names = model.module.names if hasattr(model, "module") else model.names  # get class names
             model.half() if fp16 else model.float()
             self.model = model  # explicitly assign for to(), cpu(), cuda(), half()
@@ -670,11 +681,17 @@ class DetectMultiBackend(nn.Module):
 
         # class names
         if "names" not in locals():
+            #! data 可能是 yaml 文件路径，也可能是字典
             names = yaml_load(data)["names"] if data else {i: f"class{i}" for i in range(999)}
         if names[0] == "n01440764" and len(names) == 1000:  # ImageNet
             names = yaml_load(ROOT / "data/ImageNet.yaml")["names"]  # human-readable names
 
-        self.__dict__.update(locals())  # assign all variables to self
+        self.__dict__.update(locals())  #! assign all variables to self
+        #! 更新当前作用域中的局部变量和值，到当前对象的属性字典 (__dict__)
+        #! self: 这是 Python 中的一个关键字，指的是当前对象实例
+        #! __dict__: 这是 Python 对象的一个特殊属性，它是一个字典（dictionary），存储了对象的属性和值。每个对象都有一个 __dict__ 属性。
+        #! update(): 这是字典的一个方法，用于更新字典的内容
+        #! locals(): 这是 Python 中的一个内置函数，返回当前作用域（scope）中的局部变量和值
 
     def forward(self, im, augment=False, visualize=False):
         """Performs YOLOv5 inference on input images with options for augmentation and visualization."""
@@ -767,9 +784,16 @@ class DetectMultiBackend(nn.Module):
     def warmup(self, imgsz=(1, 3, 640, 640)):
         """Performs a single inference warmup to initialize model weights, accepting an `imgsz` tuple for image size."""
         warmup_types = self.pt, self.jit, self.onnx, self.engine, self.saved_model, self.pb, self.triton
+        #! GPU 设备必须预热
+        #! Triton 服务无论设备类型均需预热
+        #! gpu_warmup_types = self.pt, self.jit, self.onnx, self.engine, self.saved_model, self.pb
+        #! if (any(gpu_warmup_types) and self.device.type != "cpu") or self.triton:
         if any(warmup_types) and (self.device.type != "cpu" or self.triton):
+            #! 空张量凭借其高效的内存分配特性，在预热、内存预分配、占位符、性能测试等场景中非常有用。但使用时需牢记：它仅负责分配内存，不保证数据有效性，正式计算前应显式填充或初始化数据。
             im = torch.empty(*imgsz, dtype=torch.half if self.fp16 else torch.float, device=self.device)  # input
-            for _ in range(2 if self.jit else 1):  #
+            #! FP16 计算需要特定的硬件支持（如 NVIDIA 的 Tensor Cores）
+            for _ in range(2 if self.jit else 1):
+                #! 如果模型类型为 JIT，则执行两次预热，否则执行一次预热
                 self.forward(im)  # warmup
 
     @staticmethod
@@ -784,12 +808,19 @@ class DetectMultiBackend(nn.Module):
         from utils.downloads import is_url
 
         sf = list(export_formats().Suffix)  # export suffixes
+        #! 支持的模型类型的后缀列表
         if not is_url(p, check=False):
             check_suffix(p, sf)  # checks
+            #! 基于 assert 判断 p 是否在 sf 中
         url = urlparse(p)  # if url may be Triton inference server
         types = [s in Path(p).name for s in sf]
+        #! 判断 p 的后缀属于哪种类型
         types[8] &= not types[9]  # tflite &= not edgetpu
+        #! 等效于 types[8] = types[8] and not types[9]
+        #! 意思是，若 types[9] 为 True，则 types[8] 为 False
         triton = not any(types) and all([any(s in url.scheme for s in ["http", "grpc"]), url.netloc])
+        #! not any(types): types 中任一元素为 True，返回 False，也即 types 中所有元素都为 False 时才返回 True
+        #! all([any(s in url.scheme for s in ["http", "grpc"]), url.netloc]): url.scheme 中任一元素为 "http" 或 "grpc"，且 url.netloc 不为空，才返回 True
         return types + [triton]
 
     @staticmethod

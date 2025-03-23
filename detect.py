@@ -148,29 +148,35 @@ def run(
         run(source='data/videos/example.mp4', weights='yolov5s.pt', conf_thres=0.4, device='0')
         ```
     """
-    source = str(source)
+    source = str(source) #! 统一转换为字符串
     save_img = not nosave and not source.endswith(".txt")  # save inference images
+    #! 未指明【不保存】，且【输入的不是txt文件】，则【保存图片】
     is_file = Path(source).suffix[1:] in (IMG_FORMATS + VID_FORMATS)
+    #! 输入的是图片或视频，但输入是文本时明明也属于文件啊？
     is_url = source.lower().startswith(("rtsp://", "rtmp://", "http://", "https://"))
+    #! 输入的是网络流
     webcam = source.isnumeric() or source.endswith(".streams") or (is_url and not is_file)
+    #! 文件名允许包含 "rtsp://", "rtmp://", "http://", "https://"，但后缀不是图片或视频
     screenshot = source.lower().startswith("screen")
-    if is_url and is_file:
+    if is_url and is_file: #! 文件名前缀为 "rtsp://", "rtmp://", "http://", "https://"，后缀是图片或视频
+        #! 这里可以保证传递给 check_file 的是 str 类型
         source = check_file(source)  # download
 
     # Directories
     save_dir = increment_path(Path(project) / name, exist_ok=exist_ok)  # increment run
     (save_dir / "labels" if save_txt else save_dir).mkdir(parents=True, exist_ok=True)  # make dir
+    #! 若指明保存文本，则创建 labels 文件夹
 
     # Load model
     device = select_device(device)
     model = DetectMultiBackend(weights, device=device, dnn=dnn, data=data, fp16=half)
     stride, names, pt = model.stride, model.names, model.pt
-    imgsz = check_img_size(imgsz, s=stride)  # check image size
+    imgsz = check_img_size(imgsz, s=stride)  #! 向上stride对齐
 
     # Dataloader
     bs = 1  # batch_size
     if webcam:
-        view_img = check_imshow(warn=True)
+        view_img = check_imshow(warn=True) #! 依赖 cv2
         dataset = LoadStreams(source, img_size=imgsz, stride=stride, auto=pt, vid_stride=vid_stride)
         bs = len(dataset)
     elif screenshot:
@@ -182,20 +188,26 @@ def run(
     # Run inference
     model.warmup(imgsz=(1 if pt or model.triton else bs, 3, *imgsz))  # warmup
     seen, windows, dt = 0, [], (Profile(device=device), Profile(device=device), Profile(device=device))
-    for path, im, im0s, vid_cap, s in dataset:
+    #! Profile(device=device):
+    for path, im, im0s, vid_cap, s in dataset: #! 图片或视频文件路径, transform后的图片, 原始图片, 视频对象, 字符串
         with dt[0]:
             im = torch.from_numpy(im).to(model.device)
             im = im.half() if model.fp16 else im.float()  # uint8 to fp16/32
+            #! 为什么 half 对应 f16: 因为 float 就是 f32, 而 double 是 f64
             im /= 255  # 0 - 255 to 0.0 - 1.0
             if len(im.shape) == 3:
                 im = im[None]  # expand for batch dim
+                #! 如果 im 的形状是 (H, W, C)，执行 im[None] 后，形状会变为 (1, H, W, C)
             if model.xml and im.shape[0] > 1:
+                #! im.shape[0] 表示张量 im 的第一个维度的大小（通常是批次大小 batch_size）
+                #! 如果 model.xml 为真且 batch_size 大于 1，则将输入张量 im 沿着第一个维度分割成多个子张量，每个子张量包含一个样本
                 ims = torch.chunk(im, im.shape[0], 0)
 
         # Inference
         with dt[1]:
             visualize = increment_path(save_dir / Path(path).stem, mkdir=True) if visualize else False
-            if model.xml and im.shape[0] > 1:
+            #! 又特喵的复用变量名
+            if model.xml and im.shape[0] > 1: #! model.xml 为真且 batch_size 大于 1
                 pred = None
                 for image in ims:
                     if pred is None:
@@ -205,6 +217,7 @@ def run(
                 pred = [pred, None]
             else:
                 pred = model(im, augment=augment, visualize=visualize)
+
         # NMS
         with dt[2]:
             pred = non_max_suppression(pred, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det)
@@ -373,7 +386,7 @@ def parse_opt():
     parser.add_argument("--conf-thres", type=float, default=0.25, help="confidence threshold")
     parser.add_argument("--iou-thres", type=float, default=0.45, help="NMS IoU threshold")
     parser.add_argument("--max-det", type=int, default=1000, help="maximum detections per image")
-    parser.add_argument("--device", default="", help="cuda device, i.e. 0 or 0,1,2,3 or cpu")
+    parser.add_argument("--device", default="mps", help="cuda device, i.e. 0 or 0,1,2,3 or cpu")
     parser.add_argument("--view-img", action="store_true", help="show results")
     parser.add_argument("--save-txt", action="store_true", help="save results to *.txt")
     parser.add_argument(
@@ -401,7 +414,9 @@ def parse_opt():
     parser.add_argument("--dnn", action="store_true", help="use OpenCV DNN for ONNX inference")
     parser.add_argument("--vid-stride", type=int, default=1, help="video frame-rate stride")
     opt = parser.parse_args()
+    print(f"{opt.imgsz=}")
     opt.imgsz *= 2 if len(opt.imgsz) == 1 else 1  # expand
+    print(f"{opt.imgsz=}")
     print_args(vars(opt))
     return opt
 
@@ -429,7 +444,7 @@ def main(opt):
         main(opt)
     ```
     """
-    check_requirements(ROOT / "requirements.txt", exclude=("tensorboard", "thop"))
+    # check_requirements(ROOT / "requirements.txt", exclude=("tensorboard", "thop"))
     run(**vars(opt))
 
 

@@ -158,29 +158,33 @@ class SmartDistributedSampler(distributed.DistributedSampler):
 
 
 def create_dataloader(
-    path,
-    imgsz,
+    path, # dataset path
+    imgsz, # image size
     batch_size,
     stride,
     single_cls=False,
-    hyp=None,
-    augment=False,
-    cache=False,
-    pad=0.0,
-    rect=False,
+    hyp=None, # hyperparameters
+    augment=False, # 是否进行数据增广
+    cache=False, # 首次加载时将预处理后的数据缓存到内存或磁盘，减少后续加载时间
+    pad=0.0, # 填充值
+    rect=False, # 矩形训练（Rectangular Training），统一批次内图像的宽高比例以减少填充
     rank=-1,
     workers=8,
     image_weights=False,
     quad=False,
     prefix="",
-    shuffle=False,
+    shuffle=False, # 是否打乱数据顺序
     seed=0,
 ):
     """Creates and returns a configured DataLoader instance for loading and processing image datasets."""
     if rect and shuffle:
+        #! rect 和 shuffle 对数据顺序的要求完全相反：rect 会统一批次内图像的宽高比例以减少填充，shuffle 会打乱数据顺序
         LOGGER.warning("WARNING ⚠️ --rect is incompatible with DataLoader shuffle, setting shuffle=False")
         shuffle = False
+
+    #! 使用 torch_distributed_zero_first 函数确保在分布式训练（Distributed Data Parallel, DDP）中，只有一个进程初始化数据集缓存
     with torch_distributed_zero_first(rank):  # init dataset *.cache only once if DDP
+        #! 创建一个 LoadImagesAndLabels 实例，用于加载和处理图像数据集
         dataset = LoadImagesAndLabels(
             path,
             imgsz,
@@ -188,7 +192,7 @@ def create_dataloader(
             augment=augment,  # augmentation
             hyp=hyp,  # hyperparameters
             rect=rect,  # rectangular batches
-            cache_images=cache,
+            cache_images=cache, # 首次加载时将预处理后的数据缓存到内存或磁盘，减少后续加载时间
             single_cls=single_cls,
             stride=int(stride),
             pad=pad,
@@ -200,10 +204,20 @@ def create_dataloader(
     batch_size = min(batch_size, len(dataset))
     nd = torch.cuda.device_count()  # number of CUDA devices
     nw = min([os.cpu_count() // max(nd, 1), batch_size if batch_size > 1 else 0, workers])  # number of workers
+    #! 按 GPU 数量分配 CPU 核心
+    #! 若 batch_size 小于 CPU_core/GPU_core，则 nw = batch_size
+    #! 若 batch_size 大于 CPU_core/GPU_core，则 nw = CPU_core/GPU_core
+    #! 若 workers 大于 CPU_core/GPU_core，则 nw = CPU_core/GPU_core
+
+    #! 如果 rank 不为 -1，则创建一个 SmartDistributedSampler 实例，用于分布式训练中的数据采样
     sampler = None if rank == -1 else SmartDistributedSampler(dataset, shuffle=shuffle)
+
+    #! 根据 image_weights 的值，选择使用 DataLoader 或 InfiniteDataLoader
     loader = DataLoader if image_weights else InfiniteDataLoader  # only DataLoader allows for attribute updates
+
     generator = torch.Generator()
     generator.manual_seed(6148914691236517205 + seed + RANK)
+
     return loader(
         dataset,
         batch_size=batch_size,
@@ -211,7 +225,7 @@ def create_dataloader(
         num_workers=nw,
         sampler=sampler,
         drop_last=quad,
-        pin_memory=PIN_MEMORY,
+        pin_memory=PIN_MEMORY, #! 将数据保留在页锁定内存中，加速从 CPU 到 GPU 的数据传输
         collate_fn=LoadImagesAndLabels.collate_fn4 if quad else LoadImagesAndLabels.collate_fn,
         worker_init_fn=seed_worker,
         generator=generator,
@@ -326,14 +340,19 @@ class LoadImages:
         """Initializes YOLOv5 loader for images/videos, supporting glob patterns, directories, and lists of paths."""
         if isinstance(path, str) and Path(path).suffix == ".txt":  # *.txt file with img/vid/dir on each line
             path = Path(path).read_text().rsplit()
+            #! 获得测试数据路径列表
         files = []
         for p in sorted(path) if isinstance(path, (list, tuple)) else [path]:
             p = str(Path(p).resolve())
+            #! 绝对路径
             if "*" in p:
+                #! 如果是通配符
                 files.extend(sorted(glob.glob(p, recursive=True)))  # glob
             elif os.path.isdir(p):
+                #! 如果是文件夹
                 files.extend(sorted(glob.glob(os.path.join(p, "*.*"))))  # dir
             elif os.path.isfile(p):
+                #! 如果是文件
                 files.append(p)  # files
             else:
                 raise FileNotFoundError(f"{p} does not exist")
@@ -341,17 +360,27 @@ class LoadImages:
         images = [x for x in files if x.split(".")[-1].lower() in IMG_FORMATS]
         videos = [x for x in files if x.split(".")[-1].lower() in VID_FORMATS]
         ni, nv = len(images), len(videos)
+        #! ni: 图片数量, nv: 视频数量
 
         self.img_size = img_size
         self.stride = stride
+        #! 下采样倍数
         self.files = images + videos
+        #! 图片和视频文件路径列表
         self.nf = ni + nv  # number of files
         self.video_flag = [False] * ni + [True] * nv
+        #! 图片标志位为False, 视频标志位为True
         self.mode = "image"
+        #! 默认模式为图片
         self.auto = auto
-        self.transforms = transforms  # optional
+        #! 是否自动调整
+        self.transforms = transforms
+        #! optional 这是什么
         self.vid_stride = vid_stride  # video frame-rate stride
+        #! 记录视频帧率步长
         if any(videos):
+            #! 如果有视频
+            #! 调用 cv2.VideoCapture() 读取视频，返回给 self.cap
             self._new_video(videos[0])  # new video
         else:
             self.cap = None
@@ -369,16 +398,22 @@ class LoadImages:
         if self.count == self.nf:
             raise StopIteration
         path = self.files[self.count]
+        #! 图片或视频文件路径
 
         if self.video_flag[self.count]:
+            #! 如果是视频
             # Read video
             self.mode = "video"
             for _ in range(self.vid_stride):
                 self.cap.grab()
+                #! 跳过 vid_stride 帧
             ret_val, im0 = self.cap.retrieve()
+            #! 读取一帧
             while not ret_val:
+                #! 当读取失败时
                 self.count += 1
                 self.cap.release()
+                #!
                 if self.count == self.nf:  # last video
                     raise StopIteration
                 path = self.files[self.count]
@@ -399,11 +434,13 @@ class LoadImages:
         if self.transforms:
             im = self.transforms(im0)  # transforms
         else:
+            #! 把 im0 缩放到 img_size 大小
             im = letterbox(im0, self.img_size, stride=self.stride, auto=self.auto)[0]  # padded resize
             im = im.transpose((2, 0, 1))[::-1]  # HWC to CHW, BGR to RGB
             im = np.ascontiguousarray(im)  # contiguous
 
         return path, im, im0, self.cap, s
+    #! 图片或视频文件路径, transform后的图片, 原始图片, 视频对象, 字符串
 
     def _new_video(self, path):
         """Initializes a new video capture object with path, frame count adjusted by stride, and orientation
@@ -411,7 +448,9 @@ class LoadImages:
         """
         self.frame = 0
         self.cap = cv2.VideoCapture(path)
+        #! 读取视频
         self.frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT) / self.vid_stride)
+        #! 处理多少帧
         self.orientation = int(self.cap.get(cv2.CAP_PROP_ORIENTATION_META))  # rotation degrees
         # self.cap.set(cv2.CAP_PROP_ORIENTATION_AUTO, 0)  # disable https://github.com/ultralytics/yolov5/issues/8493
 
@@ -443,6 +482,7 @@ class LoadStreams:
         self.stride = stride
         self.vid_stride = vid_stride  # video frame-rate stride
         sources = Path(sources).read_text().rsplit() if os.path.isfile(sources) else [sources]
+        #! Path(sources).read_text().rsplit() 是什么操作？
         n = len(sources)
         self.sources = [clean_str(x) for x in sources]  # clean source names for later
         self.imgs, self.fps, self.frames, self.threads = [None] * n, [0] * n, [0] * n, [None] * n
