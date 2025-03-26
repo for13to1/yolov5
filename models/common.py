@@ -480,8 +480,13 @@ class DetectMultiBackend(nn.Module):
         from models.experimental import attempt_download, attempt_load  # scoped to avoid circular import
 
         super().__init__()
-        w = str(weights[0] if isinstance(weights, list) else weights) #! 使用第一个权重文件
-        pt, jit, onnx, xml, engine, coreml, saved_model, pb, tflite, edgetpu, tfjs, paddle, triton = self._model_type(w) #! 各类模型的判断标志
+
+        w = str(weights[0] if isinstance(weights, list) else weights)
+        #! 使用第一个权重文件
+
+        pt, jit, onnx, xml, engine, coreml, saved_model, pb, tflite, edgetpu, tfjs, paddle, triton = self._model_type(w)
+        #! 各类模型的判断标志
+
         fp16 &= pt or jit or onnx or engine or triton  # FP16
         #! 等效于 fp16 = fp16 and (pt or jit or onnx or engine or triton)
         #! 若输入的 fp16 为 True, pt, jit, onnx, engine, triton 中有一个为 True, 则 fp16 为 True: 也就是只有这些模型支持 fp16
@@ -703,6 +708,9 @@ class DetectMultiBackend(nn.Module):
 
         if self.pt:  # PyTorch
             y = self.model(im, augment=augment, visualize=visualize) if augment or visualize else self.model(im)
+            #! 如果 augment 或 visualize 参数为 True，调用 self.model(im, augment=augment, visualize=visualize) 方法，否则调用 self.model(im) 方法
+            #! augment: 启用 多尺度/翻转/裁剪 等数据增强策略，在推理阶段生成多样化的预测结果，提升模型鲁棒性
+            #! visualize: 激活模型的中间特征图保存功能，用于可视化卷积层或检测头的输出
         elif self.jit:  # TorchScript
             y = self.model(im)
         elif self.dnn:  # ONNX OpenCV DNN
@@ -730,7 +738,7 @@ class DetectMultiBackend(nn.Module):
             y = [self.bindings[x].data for x in sorted(self.output_names)]
         elif self.coreml:  # CoreML
             im = im.cpu().numpy()
-            im = Image.fromarray((im[0] * 255).astype("uint8"))
+            im = Image.fromarray((im[0] * 255).astype("uint8")) #! 转为PIL图像
             # im = im.resize((192, 320), Image.BILINEAR)
             y = self.model.predict({"image": im})  # coordinates are xywh normalized
             if "confidence" in y:
@@ -772,8 +780,10 @@ class DetectMultiBackend(nn.Module):
             y = [x if isinstance(x, np.ndarray) else x.numpy() for x in y]
             y[0][..., :4] *= [w, h, w, h]  # xywh normalized to pixels
 
-        if isinstance(y, (list, tuple)):
+        if isinstance(y, (list, tuple)): #! 多输出模型处理
             return self.from_numpy(y[0]) if len(y) == 1 else [self.from_numpy(x) for x in y]
+            #! y[0]) if len(y) == 1: 某些框架（如ONNX）即使模型只有1个输出，也强制返回列表
+            #! [self.from_numpy(x) for x in y]: 遍历每个输出，逐个转换为PyTorch张量，保持列表结构（如 [detections, proto]）
         else:
             return self.from_numpy(y)
 

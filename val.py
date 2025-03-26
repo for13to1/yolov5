@@ -253,6 +253,7 @@ def run(
     Returns:
         dict: Contains performance metrics including precision, recall, mAP50, and mAP50-95.
     """
+
     # Initialize/load model and set device
     training = model is not None
     #! 若 model 存在，则 training 被设置为 True；若 model 不存在，则 training 被设置为 False：什么意思？
@@ -308,28 +309,30 @@ def run(
     #! 如果 single_cls 为 True，则 nc 为 1，否则 nc 为 data["nc"] 的值
     iouv = torch.linspace(0.5, 0.95, 10, device=device)  # iou vector for mAP@0.5:0.95
     #! [0.5000, 0.5500, 0.6000, 0.6500, 0.7000, 0.7500, 0.8000, 0.8500, 0.9000, 0.9500]
+    #! COCO数据集的评估标准，要求模型在IoU阈值从0.5到0.95（步长0.05）的范围内均表现良好
     niou = iouv.numel() # 10
 
     # Dataloader
-    if not training:
+    if not training: #! 仅在非训练模式下执行（验证/推理）
         if pt and not single_cls:  # check --weights are trained on --data
-            #! 支持 PyTorch，且不是单类模型
+            #! 支持 PyTorch，且非单类别模式
             ncm = model.model.nc #! 使用模型的 nc 值，即类别数
+            #! 预训练权重的类别数必须与数据集的类别数一致（除非显式启用单类别模式）
             assert ncm == nc, (
                 f"{weights} ({ncm} classes) trained on different --data than what you passed ({nc} "
                 f"classes). Pass correct combination of --weights and --data that are trained together."
             )
+
         model.warmup(imgsz=(1 if pt else batch_size, 3, imgsz, imgsz))  # warmup
         #! 若 pt 为 True，则 imgsz 为 (1, 3, imgsz, imgsz)，否则 imgsz 为 (batch_size, 3, imgsz, imgsz)
+
         pad, rect = (0.0, False) if task == "speed" else (0.5, pt)  # square inference for benchmarks
-        #! 如果任务类型为 "speed"，则：
-        #! 填充（pad）参数为 0.0，这意味着不进行填充。
-        #! 矩形（rect）参数为 False，这意味着不使用矩形。
-        #! 如果任务类型不是 "speed"，则：
-        #! 填充（pad）参数为 0.5，这意味着进行 50% 的填充。
-        #! 矩形（rect）参数为 pt，这意味着使用矩形，具体取决于 pt 的值
-        task = task if task in ("train", "val", "speed") else "val"  # path to train/val/test images
-        #! 这里返回的是 (dataloader, dataset)
+        #! task == "speed": 不填充，拉伸为正方形（容易引入形变）: 最大化吞吐量，适合测速
+        #! rectangle inference: 等比例缩放+填充到正方形
+
+        task = task if task in ("train", "val", "test") else "val"  # path to train/val/test images
+
+        #! 函数返回的是 (dataloader, dataset), 这里只取 dataloader
         dataloader = create_dataloader(
             data[task],
             imgsz,
@@ -354,71 +357,141 @@ def run(
         names = dict(enumerate(names))
 
     class_map = coco80_to_coco91_class() if is_coco else list(range(1000))
+    #? 将YOLO训练时使用的80个类别索引映射回COCO官方91个类别的原始ID: COCO数据集实际有91个类别，但部分类别因样本少被合并，训练时仅用80类。此函数确保评估结果与官方类别ID对齐
 
-    s = ("%22s" + "%11s" * 6) % ("Class", "Images", "Instances", "P", "R", "mAP50", "mAP50-95")
     tp, fp, p, r, f1, mp, mr, map50, ap50, map = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+    #? tp: true positive
+    #? fp: false positive
+    #? p: precision
+    #? r: recall
+    #? f1: F1 score
+    #? mp: mean precision
+    #? mr: mean recall
+    #? map50: mean average precision at 0.5
+    #? ap50: average precision at 0.5
+    #? map: mean average precision
+
     dt = Profile(device=device), Profile(device=device), Profile(device=device)  # profiling times
+
     loss = torch.zeros(3, device=device)
     jdict, stats, ap, ap_class = [], [], [], []
+    #! jdict: List to collect JSON formatted detection results.
     callbacks.run("on_val_start")
 
+    s = ("%22s" + "%11s" * 6) % ("Class", "Images", "Instances", "P", "R", "mAP50", "mAP50-95")
     pbar = tqdm(dataloader, desc=s, bar_format=TQDM_BAR_FORMAT)  # progress bar
     for batch_i, (im, targets, paths, shapes) in enumerate(pbar):
+        #! 逐批次地
         callbacks.run("on_val_batch_start")
+        #? 触发验证批次开始时的回调钩子
+
         with dt[0]:
             if cuda:
                 im = im.to(device, non_blocking=True)
+                #? non_blocking=True: 异步传输图像数据
                 targets = targets.to(device)
+                #? non_blocking=False: 同步传输标签数据
             im = im.half() if half else im.float()  # uint8 to fp16/32
             im /= 255  # 0 - 255 to 0.0 - 1.0
             nb, _, height, width = im.shape  # batch size, channels, height, width
 
         # Inference
         with dt[1]:
+            #? compute_loss: 是否保留训练输出（用于损失计算）
+            #? augment: 推理时应用数据增强（如多尺度/翻转）
             preds, train_out = model(im) if compute_loss else (model(im, augment=augment), None)
+            #? model(im): 是PyTorch的语法糖，自动触发前向传播
+            #? preds：模型的预测结果（边界框、类别、置信度）
+            #? train_out：训练所需的中间输出（如各层特征），用于后续损失计算
+            #! compute_loss=False 时，启用数据增强（如测试时增强，TTA），但仅返回预测结果 preds
 
         # Loss
         if compute_loss:
+            #! 接收模型输出 train_out 和真实标签 targets，返回损失值
             loss += compute_loss(train_out, targets)[1]  # box, obj, cls
 
         # NMS
         targets[:, 2:] *= torch.tensor((width, height, width, height), device=device)  # to pixels
+        #? targets 的格式为 [batch_index, class_id, x_center, y_center, width, height]，其中坐标是归一化的（范围[0,1]），乘以图像的宽（width）和高（height），将归一化坐标转换为实际像素值
         lb = [targets[targets[:, 0] == i, 1:] for i in range(nb)] if save_hybrid else []  # for autolabelling
+        #? save_hybrid: 控制是否启用混合模式（如同时使用标注数据和自动生成标签）
+        #? targets[:, 0] == i: 用于获取第 i 张图上的所有 targets
+        #? targets[targets[:, 0] == i, 1:]: 获取第 i 张图上的所有 targets 中的 class_id、x_center、y_center、width、height
+        #! lb: 参考标签
         with dt[2]:
             preds = non_max_suppression(
                 preds, conf_thres, iou_thres, labels=lb, multi_label=True, agnostic=single_cls, max_det=max_det
             )
+            #! multi_label=True: 单个框可以预测多个类别标签
+            #! agnostic=single_cls: 若为True，则跨类别进行NMS（适用于单类别任务）
+            #! max_det: 每个图像最多保留的预测框数
+            #! 返回值 preds 的格式: [x1, y1, x2, y2, conf, cls]
 
         # Metrics
-        for si, pred in enumerate(preds):
+        for si, pred in enumerate(preds): #! si: sequence index
             labels = targets[targets[:, 0] == si, 1:]
+            #! targets[:, 0] == si: 用于获取第 si 张图上的所有 targets
+            #! targets[targets[:, 0] == si, 1:]: 获取第 si 张图上的所有 targets 中的 class_id、x_center、y_center、width、height
             nl, npr = labels.shape[0], pred.shape[0]  # number of labels, predictions
+            #! nl: 第 si 张图上的 labels 的数量
+            #! npr: 第 si 张图上的预测框的数量
             path, shape = Path(paths[si]), shapes[si][0]
+            #! path: 第 si 张图的路径
+            #! shape: 第 si 张图的原始尺寸
             correct = torch.zeros(npr, niou, dtype=torch.bool, device=device)  # init
-            seen += 1
+            #! correct[i, j] = True 表示第 i 个预测框在IoU阈值 iouv[j] 下正确匹配某真实框
+            #! 若预测框与某真实框的 IoU > 阈值 且类别正确，标记对应位置为 True
+            seen += 1 #! 已处理图像计数+1
 
-            if npr == 0:
-                if nl:
+            if npr == 0: #! 所有预测框的置信度低于阈值或在NMS中被过滤，导致无有效检测结果
+                if nl: #! 若存在真实目标但无预测框，需记录漏检信息
                     stats.append((correct, *torch.zeros((2, 0), device=device), labels[:, 0]))
+                    #! labels[:, 0]：真实标签的类别ID（用于统计各类别的漏检情况）
                     if plots:
                         confusion_matrix.process_batch(detections=None, labels=labels[:, 0])
+                        #! detections=None 表示无预测框，labels 提供真实类别
+                        #! 所有真实标签被计为假阴性（FN），更新混淆矩阵的FN计数
                 continue
+                #! 无预测框时无需执行坐标转换、置信度计算等步骤，直接处理下一张图像
 
             # Predictions
             if single_cls:
+                #! 当启用单类别模式（single_cls=True）时，将所有预测框的类别ID强制设为 0
                 pred[:, 5] = 0
             predn = pred.clone()
+            #! 将预测框坐标从 模型输入空间（如填充后的640x640）映射回 原始图像空间（如1280x720），考虑可能的缩放和填充
             scale_boxes(im[si].shape[1:], predn[:, :4], shape, shapes[si][1])  # native-space pred
+            #! im[si].shape[1:]：模型输入图像的尺寸（如 (640, 640)），即预处理后的尺寸
+            #! predn[:, :4]：待转换的预测框坐标（x1, y1, x2, y2），归一化到输入图像尺寸
+            #! shape：原始图像的尺寸（如 (1280, 720)）
+            #! shapes[si][1]：预处理时的缩放比例或填充信息，用于逆向计算
 
             # Evaluate
             if nl:
                 tbox = xywh2xyxy(labels[:, 1:5])  # target boxes
+                #! labels[:, 1:5] 形状为 [num_labels, 4]，包含归一化的中心坐标和宽高
+                #! tbox 形状为 [num_labels, 4]，转换为归一化的角点坐标 [x1, y1, x2, y2]
                 scale_boxes(im[si].shape[1:], tbox, shape, shapes[si][1])  # native-space labels
+                #! im[si].shape[1:]：模型输入图像的尺寸（如 (640, 640)）
+                #! tbox：待转换的真实标签坐标（归一化到输入图像尺寸）
+                #! shape：原始图像的尺寸（如 (1280, 720)）
+                #! shapes[si][1]: 预处理时的缩放比例和填充信息
                 labelsn = torch.cat((labels[:, 0:1], tbox), 1)  # native-space labels
+                #! labelsn 形状为 [num_labels, 5]，格式为 [class_id, x1, y1, x2, y2]
                 correct = process_batch(predn, labelsn, iouv)
+                #! 逐个预测框与真实标签计算IoU，判断是否在不同阈值下匹配成功
                 if plots:
                     confusion_matrix.process_batch(predn, labelsn)
+                    #! 记录预测框与真实标签的类别匹配情况，生成分类性能分析图
+                    #! 预测框与真实框IoU > 阈值且类别正确 → 真阳性（TP）
+                    #! 预测框未匹配任何真实框 → 假阳性（FP）
+                    #! 真实框未被任何预测框匹配 → 假阴性（FN）
+
             stats.append((correct, pred[:, 4], pred[:, 5], labels[:, 0]))  # (correct, conf, pcls, tcls)
+            #! correct：匹配矩阵，形状 [num_pred, num_iou_thresholds]
+            #! pred[:, 4]：预测框的置信度，形状 [num_pred]
+            #! pred[:, 5]：预测的类别概率，形状 [num_pred]
+            #! labels[:, 0]：真实标签的类别ID，形状 [num_labels]
 
             # Save/log
             if save_txt:
@@ -426,6 +499,7 @@ def run(
                 save_one_txt(predn, save_conf, shape, file=save_dir / "labels" / f"{path.stem}.txt")
             if save_json:
                 save_one_json(predn, jdict, path, class_map)  # append to COCO-JSON dictionary
+
             callbacks.run("on_val_image_end", pred, predn, path, names, im[si])
 
         # Plot images

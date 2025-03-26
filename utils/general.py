@@ -1063,8 +1063,15 @@ def non_max_suppression(
     mps = "mps" in device.type  # Apple MPS
     if mps:  #! MPS not fully supported yet, convert tensors to CPU before NMS
         prediction = prediction.cpu()
+    #? prediction.shape: (batch_size, num_anchors, [x_center, y_center, width, height, obj_confidence, mask_params, class_1, class_2, ..., class_nc].len())
     bs = prediction.shape[0]  #! batch size
     nc = prediction.shape[2] - nm - 5  # number of classes
+    #! nm: 分割任务中掩码参数的数量（目标检测任务中 nm=0）
+    #! 5: 基础参数（x_center, y_center, width, height, obj_confidence）
+    #? nc = total_features - mask_params - base_params
+    #? 类别数 = 总特征数 - 掩码参数数量 - 5个基础参数
+
+    #! filter by confidence
     xc = prediction[..., 4] > conf_thres  # candidates
 
     # Settings
@@ -1074,27 +1081,44 @@ def non_max_suppression(
     time_limit = 0.5 + 0.05 * bs  # seconds to quit after
     redundant = True  # require redundant detections
     multi_label &= nc > 1  # multiple labels per box (adds 0.5ms/img)
+    #! 仅当数据集类别数 nc > 1 时生效
     merge = False  # use merge-NMS
+    #! 若启用，将重叠框的坐标加权平均，生成综合框（缓解密集目标漏检）
 
     t = time.time()
     mi = 5 + nc  # mask start index
     output = [torch.zeros((0, 6 + nm), device=prediction.device)] * bs
+    # output = [torch.zeros((0, 6 + nm), device=prediction.device) for _ in range(bs)] #? 改用列表推导确保每个张量独立
+    #! 通过预定义空张量列表，为批次中的每张图像提供了一个标准化的结果存储容器，确保后续处理流程（如NMS、结果解析）能够高效、统一地处理多图输出，同时支持不同任务（检测、分割）的扩展需求
+    #? (0, 6 + nm): 表示初始时无检测框（0行），处理后会动态添加有效检测
+
     for xi, x in enumerate(prediction):  # image index, image inference
         # Apply constraints
         # x[((x[..., 2:4] < min_wh) | (x[..., 2:4] > max_wh)).any(1), 4] = 0  # width-height
         x = x[xc[xi]]  # confidence
+        #! xc[xi]: 布尔掩码数组，标记当前图像中置信度（x[:,4]）超过阈值 conf_thres 的预测框
+        #! x[:,4] > conf_thres 的预测框
 
         # Cat apriori labels if autolabelling
-        if labels and len(labels[xi]):
-            lb = labels[xi]
+        if labels and len(labels[xi]): #! 如果有真实标签且当前图像存在标签
+            lb = labels[xi] #! 形状 [num_gt, 5], 格式 [class_id, x_center, y_center, width, height]
+            #! 当前图像的真实标签
             v = torch.zeros((len(lb), nc + nm + 5), device=x.device)
             v[:, :4] = lb[:, 1:5]  # box
+            #! 填充边界框坐标（xywh）: 真实标签的坐标已经是归一化值（xywh），直接填充无需转换
             v[:, 4] = 1.0  # conf
+            #! 置信度设为1（真实框置信度）
             v[range(len(lb)), lb[:, 0].long() + 5] = 1.0  # cls
+            #! 设置类别one-hot编码
+            #? lb[:, 0].long()：获取真实框的类别索引（整数）
+            #? lb[:, 0].long() + 5：将类别索引偏移5（前5列为坐标和置信度）
+            #? v[row, class_idx + 5] = 1.0：在对应位置设为1，生成one-hot编码
             x = torch.cat((x, v), 0)
+            #! 合并预测框和真实标签框: x 的最终形状为 [num_pred + num_gt, nc + nm + 5]
 
         # If none remain process next image
         if not x.shape[0]:
+            #? 如果当前图像经过置信度过滤后无有效预测框（x.shape[0] == 0），跳过后续处理，直接处理下一张图像
             continue
 
         # Compute conf
@@ -1103,6 +1127,7 @@ def non_max_suppression(
         # Box/Mask
         box = xywh2xyxy(x[:, :4])  # center_x, center_y, width, height) to (x1, y1, x2, y2)
         mask = x[:, mi:]  # zero columns if no masks
+        #! 形状 [N, nm]，nm 为掩码参数数量
 
         # Detections matrix nx6 (xyxy, conf, cls)
         if multi_label:
