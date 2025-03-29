@@ -708,6 +708,8 @@ class DetectMultiBackend(nn.Module):
 
         if self.pt:  # PyTorch
             y = self.model(im, augment=augment, visualize=visualize) if augment or visualize else self.model(im)
+            #! 模型本批次输出结果的 shape 为 (batch_size, anchor_num, 5+mask_param_num+class_num)
+            #! y 可能为 tuple: 其中 y[1] 为各特征层输出
             #! 如果 augment 或 visualize 参数为 True，调用 self.model(im, augment=augment, visualize=visualize) 方法，否则调用 self.model(im) 方法
             #! augment: 启用 多尺度/翻转/裁剪 等数据增强策略，在推理阶段生成多样化的预测结果，提升模型鲁棒性
             #! visualize: 激活模型的中间特征图保存功能，用于可视化卷积层或检测头的输出

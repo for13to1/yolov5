@@ -1053,9 +1053,11 @@ def non_max_suppression(
     Returns:
          list of detections, on (n,6) tensor per image [xyxy, conf, cls]
     """
+
     # Checks
     assert 0 <= conf_thres <= 1, f"Invalid Confidence threshold {conf_thres}, valid values are between 0.0 and 1.0"
     assert 0 <= iou_thres <= 1, f"Invalid IoU {iou_thres}, valid values are between 0.0 and 1.0"
+
     if isinstance(prediction, (list, tuple)):  # YOLOv5 model in validation model, output = (inference_out, loss_out)
         prediction = prediction[0]  # select only inference output
 
@@ -1063,11 +1065,12 @@ def non_max_suppression(
     mps = "mps" in device.type  # Apple MPS
     if mps:  #! MPS not fully supported yet, convert tensors to CPU before NMS
         prediction = prediction.cpu()
+
     #? prediction.shape: (batch_size, num_anchors, [x_center, y_center, width, height, obj_confidence, mask_params, class_1, class_2, ..., class_nc].len())
     bs = prediction.shape[0]  #! batch size
     nc = prediction.shape[2] - nm - 5  # number of classes
     #! nm: 分割任务中掩码参数的数量（目标检测任务中 nm=0）
-    #! 5: 基础参数（x_center, y_center, width, height, obj_confidence）
+    #! 5: 基础参数 (x_center, y_center, width, height, obj_confidence)
     #? nc = total_features - mask_params - base_params
     #? 类别数 = 总特征数 - 掩码参数数量 - 5个基础参数
 
@@ -1095,24 +1098,26 @@ def non_max_suppression(
     for xi, x in enumerate(prediction):  # image index, image inference
         # Apply constraints
         # x[((x[..., 2:4] < min_wh) | (x[..., 2:4] > max_wh)).any(1), 4] = 0  # width-height
-        x = x[xc[xi]]  # confidence
-        #! xc[xi]: 布尔掩码数组，标记当前图像中置信度（x[:,4]）超过阈值 conf_thres 的预测框
-        #! x[:,4] > conf_thres 的预测框
+        x = x[xc[xi]]
+        #? xc[xi]: 布尔掩码数组，标记当前图像中置信度（x[:,4]）超过阈值 conf_thres 的预测框
+        #! 此时的左值 x: x[:,4] > conf_thres 的预测框
 
         # Cat apriori labels if autolabelling
         if labels and len(labels[xi]): #! 如果有真实标签且当前图像存在标签
             lb = labels[xi] #! 形状 [num_gt, 5], 格式 [class_id, x_center, y_center, width, height]
             #! 当前图像的真实标签
+
             v = torch.zeros((len(lb), nc + nm + 5), device=x.device)
+            #! v 的 shape 为 (num_gt, nc + nm + 5), 每行为 (x,y,w,h,1,[nc个one-hot编码])
             v[:, :4] = lb[:, 1:5]  # box
-            #! 填充边界框坐标（xywh）: 真实标签的坐标已经是归一化值（xywh），直接填充无需转换
+            #? 填充边界框坐标（xywh）: 真实标签的坐标已经是归一化值（xywh），直接填充无需转换
             v[:, 4] = 1.0  # conf
-            #! 置信度设为1（真实框置信度）
+            #? 置信度设为1（真实框置信度）
             v[range(len(lb)), lb[:, 0].long() + 5] = 1.0  # cls
-            #! 设置类别one-hot编码
+            #? len(lb): 真实框的数量
             #? lb[:, 0].long()：获取真实框的类别索引（整数）
             #? lb[:, 0].long() + 5：将类别索引偏移5（前5列为坐标和置信度）
-            #? v[row, class_idx + 5] = 1.0：在对应位置设为1，生成one-hot编码
+            #! 各真实框的各类别的对应 conf 设为 1，即 one-hot 编码
             x = torch.cat((x, v), 0)
             #! 合并预测框和真实标签框: x 的最终形状为 [num_pred + num_gt, nc + nm + 5]
 
@@ -1123,6 +1128,7 @@ def non_max_suppression(
 
         # Compute conf
         x[:, 5:] *= x[:, 4:5]  # conf = obj_conf * cls_conf
+        #! 计算各类别的置信度
 
         # Box/Mask
         box = xywh2xyxy(x[:, :4])  # center_x, center_y, width, height) to (x1, y1, x2, y2)
@@ -1130,9 +1136,14 @@ def non_max_suppression(
         #! 形状 [N, nm]，nm 为掩码参数数量
 
         # Detections matrix nx6 (xyxy, conf, cls)
+        #! 此时的 x 为经过置信度过滤后的预测框，且各类别的置信度已基于 obj_conf * cls_conf 计算
+        #? x[:, 5:mi]: 各预测框的各类别的置信度
         if multi_label:
             i, j = (x[:, 5:mi] > conf_thres).nonzero(as_tuple=False).T
+            #? x[:, 5:mi] > conf_thres: 生成布尔掩码，标记哪些类别分数超过阈值
+            #? .nonzero(as_tuple=False).T 获取符合条件的行索引 i 和类别索引 j
             x = torch.cat((box[i], x[i, 5 + j, None], j[:, None].float(), mask[i]), 1)
+            #? box[i]: 置信度大于阈值的预测框的 xyxy 坐标
         else:  # best class only
             conf, j = x[:, 5:mi].max(1, keepdim=True)
             x = torch.cat((box, conf, j.float(), mask), 1)[conf.view(-1) > conf_thres]

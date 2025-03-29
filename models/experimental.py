@@ -96,12 +96,16 @@ def attempt_load(weights, device=None, inplace=True, fuse=True):
     model = Ensemble()
     for w in weights if isinstance(weights, list) else [weights]:
         ckpt = torch.load(attempt_download(w), map_location="cpu")  # load
+        #! checkpoint: 训练过程中保存的模型状态的快照，包括模型参数（权重和偏置）、优化器状态（如动量、学习率等）、训练元数据（当前轮次、损失值、超参数等）
         ckpt = (ckpt.get("ema") or ckpt["model"]).to(device).float()  # FP32 model
+        #! EMA (Exponential Moving Average, 指数移动平均)
 
         # Model compatibility updates
         if not hasattr(ckpt, "stride"):
+            #! 若模型缺少stride属性，添加默认stride（YOLOv5的默认下采样倍数）
             ckpt.stride = torch.tensor([32.0])
         if hasattr(ckpt, "names") and isinstance(ckpt.names, (list, tuple)):
+            #! 将类别名称列表转换为字典格式（索引到名称的映射）
             ckpt.names = dict(enumerate(ckpt.names))  # convert to dict
 
         model.append(ckpt.fuse().eval() if fuse and hasattr(ckpt, "fuse") else ckpt.eval())  # model in eval mode
@@ -109,8 +113,10 @@ def attempt_load(weights, device=None, inplace=True, fuse=True):
     # Module updates
     for m in model.modules():
         t = type(m)
+        #! 设置激活函数和Detect层的inplace操作
         if t in (nn.Hardswish, nn.LeakyReLU, nn.ReLU, nn.ReLU6, nn.SiLU, Detect, Model):
-            m.inplace = inplace
+            m.inplace = inplace #! 控制是否原地操作以节省内存
+            #! Detect层兼容性修复（适配旧版本）
             if t is Detect and not isinstance(m.anchor_grid, list):
                 delattr(m, "anchor_grid")
                 setattr(m, "anchor_grid", [torch.zeros(1)] * m.nl)
@@ -124,7 +130,9 @@ def attempt_load(weights, device=None, inplace=True, fuse=True):
     # Return detection ensemble
     print(f"Ensemble created with {weights}\n")
     for k in "names", "nc", "yaml":
-        setattr(model, k, getattr(model[0], k))
+        setattr(model, k, getattr(model[0], k)) #! 继承第一个模型的属性
+    #! 计算最大stride（用于图像预处理）
     model.stride = model[torch.argmax(torch.tensor([m.stride.max() for m in model])).int()].stride  # max stride
+    #! 验证所有模型的类别数一致
     assert all(model[0].nc == m.nc for m in model), f"Models have different class counts: {[m.nc for m in model]}"
     return model
