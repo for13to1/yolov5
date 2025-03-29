@@ -277,12 +277,12 @@ def run(
         model = DetectMultiBackend(weights, device=device, dnn=dnn, data=data, fp16=half)
         stride, pt, jit, engine = model.stride, model.pt, model.jit, model.engine
         #? stride: 如果 stride 为 2，那么卷积核将每次移动 2 个像素。这样可以减少输出特征图的大小，同时保留输入数据的重要信息。
-        #! pt: PyTorch model
-        #! jit: TorchScript model
-        #! engine: TensorRT engine
+        #? pt: PyTorch model
+        #? jit: TorchScript model
+        #? engine: TensorRT engine
         imgsz = check_img_size(imgsz, s=stride)  # check image size
         half = model.fp16  # FP16 supported on limited backends with CUDA
-        #! model.fp16 表示模型是否支持 FP16 计算。如果模型支持 FP16，则 half 变量将被设置为 True，否则将被设置为 False
+        #? model.fp16 表示模型是否支持 FP16 计算。如果模型支持 FP16，则 half 变量将被设置为 True，否则将被设置为 False
         #! FP16 计算仅在某些后端（backend）上支持，并且需要 CUDA（一种 NVIDIA 的并行计算平台）。
         if engine:
             #? 优化引擎（如 TensorRT）：batch_size 需在导出时预先设定，推理时不可动态修改
@@ -400,6 +400,8 @@ def run(
             #? compute_loss: 是否保留训练输出（用于损失计算）
             #? augment: 推理时应用数据增强（如多尺度/翻转）
             preds, train_out = model(im) if compute_loss else (model(im, augment=augment), None)
+            #! 模型本批次输出结果的 shape 为 (batch_size, anchor_num, 5+mask_param_num+class_num)
+            #! 其中 5 对应 (x_center, y_center, width, height, obj_confidence)
             #? model(im): 是PyTorch的语法糖，自动触发前向传播
             #? preds：模型的预测结果（边界框、类别、置信度）
             #? train_out：训练所需的中间输出（如各层特征），用于后续损失计算
@@ -410,14 +412,16 @@ def run(
             #! 接收模型输出 train_out 和真实标签 targets，返回损失值
             loss += compute_loss(train_out, targets)[1]  # box, obj, cls
 
-        # NMS
         targets[:, 2:] *= torch.tensor((width, height, width, height), device=device)  # to pixels
+        #? targets 的 shape 为 (object_num, 6)
         #? targets 的格式为 [batch_index, class_id, x_center, y_center, width, height]，其中坐标是归一化的（范围[0,1]），乘以图像的宽（width）和高（height），将归一化坐标转换为实际像素值
         lb = [targets[targets[:, 0] == i, 1:] for i in range(nb)] if save_hybrid else []  # for autolabelling
         #? save_hybrid: 控制是否启用混合模式（如同时使用标注数据和自动生成标签）
         #? targets[:, 0] == i: 用于获取第 i 张图上的所有 targets
         #? targets[targets[:, 0] == i, 1:]: 获取第 i 张图上的所有 targets 中的 class_id、x_center、y_center、width、height
         #! lb: 参考标签
+
+        # NMS
         with dt[2]:
             preds = non_max_suppression(
                 preds, conf_thres, iou_thres, labels=lb, multi_label=True, agnostic=single_cls, max_det=max_det
@@ -425,31 +429,31 @@ def run(
             #! multi_label=True: 单个框可以预测多个类别标签
             #! agnostic=single_cls: 若为True，则跨类别进行NMS（适用于单类别任务）
             #! max_det: 每个图像最多保留的预测框数
-            #! 返回值 preds 的格式: [x1, y1, x2, y2, conf, cls]
+            #! 返回值 preds 的 shape 为长度为 batch_size 的列表，每个元素的 shape 为 (max_det, 6): 其中 6 对应 (x1, y1, x2, y2, conf, cls)
 
         # Metrics
         for si, pred in enumerate(preds): #! si: sequence index
             labels = targets[targets[:, 0] == si, 1:]
-            #! targets[:, 0] == si: 用于获取第 si 张图上的所有 targets
-            #! targets[targets[:, 0] == si, 1:]: 获取第 si 张图上的所有 targets 中的 class_id、x_center、y_center、width、height
+            #? targets[:, 0] == si: 用于获取第 si 张图上的所有 targets
+            #? targets[targets[:, 0] == si, 1:]: 获取第 si 张图上的所有 targets 中的 class_id、x_center、y_center、width、height
             nl, npr = labels.shape[0], pred.shape[0]  # number of labels, predictions
-            #! nl: 第 si 张图上的 labels 的数量
-            #! npr: 第 si 张图上的预测框的数量
+            #? nl: 第 si 张图上的 labels 的数量
+            #? npr: 第 si 张图上的预测框的数量
             path, shape = Path(paths[si]), shapes[si][0]
-            #! path: 第 si 张图的路径
-            #! shape: 第 si 张图的原始尺寸
+            #? path: 第 si 张图的路径
+            #? shape: 第 si 张图的原始尺寸
             correct = torch.zeros(npr, niou, dtype=torch.bool, device=device)  # init
-            #! correct[i, j] = True 表示第 i 个预测框在IoU阈值 iouv[j] 下正确匹配某真实框
-            #! 若预测框与某真实框的 IoU > 阈值 且类别正确，标记对应位置为 True
-            seen += 1 #! 已处理图像计数+1
+            #? correct[i, j] = True 表示第 i 个预测框在IoU阈值 iouv[j] 下正确匹配某真实框
+            #? 若预测框与某真实框的 IoU > 阈值 且类别正确，标记对应位置为 True
+            seen += 1 #? 已处理图像计数+1
 
-            if npr == 0: #! 所有预测框的置信度低于阈值或在NMS中被过滤，导致无有效检测结果
-                if nl: #! 若存在真实目标但无预测框，需记录漏检信息
+            if npr == 0: #? 所有预测框的置信度低于阈值或在NMS中被过滤，导致无有效检测结果
+                if nl: #? 若存在真实目标但无预测框，需记录漏检信息
                     stats.append((correct, *torch.zeros((2, 0), device=device), labels[:, 0]))
-                    #! labels[:, 0]：真实标签的类别ID（用于统计各类别的漏检情况）
+                    #? labels[:, 0]：真实标签的类别ID（用于统计各类别的漏检情况）
                     if plots:
                         confusion_matrix.process_batch(detections=None, labels=labels[:, 0])
-                        #! detections=None 表示无预测框，labels 提供真实类别
+                        #? detections=None 表示无预测框，labels 提供真实类别
                         #! 所有真实标签被计为假阴性（FN），更新混淆矩阵的FN计数
                 continue
                 #! 无预测框时无需执行坐标转换、置信度计算等步骤，直接处理下一张图像
@@ -461,10 +465,10 @@ def run(
             predn = pred.clone()
             #! 将预测框坐标从 模型输入空间（如填充后的640x640）映射回 原始图像空间（如1280x720），考虑可能的缩放和填充
             scale_boxes(im[si].shape[1:], predn[:, :4], shape, shapes[si][1])  # native-space pred
-            #! im[si].shape[1:]：模型输入图像的尺寸（如 (640, 640)），即预处理后的尺寸
-            #! predn[:, :4]：待转换的预测框坐标（x1, y1, x2, y2），归一化到输入图像尺寸
-            #! shape：原始图像的尺寸（如 (1280, 720)）
-            #! shapes[si][1]：预处理时的缩放比例或填充信息，用于逆向计算
+            #? im[si].shape[1:]：模型输入图像的尺寸（如 (640, 640)），即预处理后的尺寸
+            #? predn[:, :4]：待转换的预测框坐标（x1, y1, x2, y2），归一化到输入图像尺寸
+            #? shape：原始图像的尺寸（如 (1280, 720)）
+            #? shapes[si][1]：预处理时的缩放比例或填充信息，用于逆向计算
 
             # Evaluate
             if nl:
@@ -504,6 +508,8 @@ def run(
 
         # Plot images
         if plots and batch_i < 3:
+            #? targets: 当前批次的目标框
+            #? preds: 当前批次的预测框
             plot_images(im, targets, paths, save_dir / f"val_batch{batch_i}_labels.jpg", names)  # labels
             plot_images(im, output_to_target(preds), paths, save_dir / f"val_batch{batch_i}_pred.jpg", names)  # pred
 

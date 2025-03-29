@@ -1067,7 +1067,7 @@ def non_max_suppression(
     bs = prediction.shape[0]  #! batch size
     nc = prediction.shape[2] - nm - 5  # number of classes
     #! nm: 分割任务中掩码参数的数量（目标检测任务中 nm=0）
-    #! 5: 基础参数（x_center, y_center, width, height, obj_confidence）
+    #! 5: 基础参数 (x_center, y_center, width, height, obj_confidence)
     #? nc = total_features - mask_params - base_params
     #? 类别数 = 总特征数 - 掩码参数数量 - 5个基础参数
 
