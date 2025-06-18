@@ -182,7 +182,7 @@ def create_dataloader(
         LOGGER.warning("WARNING ⚠️ --rect is incompatible with DataLoader shuffle, setting shuffle=False")
         shuffle = False
 
-    #! 使用 torch_distributed_zero_first 函数确保在分布式训练（Distributed Data Parallel, DDP）中，只有一个进程初始化数据集缓存
+    #! 使用 torch_distributed_zero_first 函数确保在分布式训练 (Distributed Data Parallel, DDP) 中，只有一个进程初始化数据集缓存
     with torch_distributed_zero_first(rank):  # init dataset *.cache only once if DDP
         #! 创建一个 LoadImagesAndLabels 实例，用于加载和处理图像数据集
         dataset = LoadImagesAndLabels(
@@ -605,11 +605,15 @@ class LoadImagesAndLabels(Dataset):
         self.image_weights = image_weights
         self.rect = False if image_weights else rect
         self.mosaic = self.augment and not self.rect  # load 4 images at a time into a mosaic (only during training)
+        #? 只有在启用数据增强 (augment=True) 且未启用矩形训练 (rect=False) 时，才使用马赛克增强
         self.mosaic_border = [-img_size // 2, -img_size // 2]
         self.stride = stride
         self.path = path
         self.albumentations = Albumentations(size=img_size) if augment else None
+        #? Albumentations: an image augmentation library
+        # https://github.com/albumentations-team/albumentations
 
+        # Load image paths
         try:
             f = []  # image files
             for p in path if isinstance(path, list) else [path]:
@@ -633,9 +637,15 @@ class LoadImagesAndLabels(Dataset):
 
         # Check cache
         self.label_files = img2label_paths(self.im_files)  # labels
+        '''
+        前面的循环结束后：p 保留的是 最后一次循环的值
+        - 如果 path 是单个路径：p 就是这个路径的 Path 对象
+        - 如果 path 是路径列表：p 是列表中最后一个路径的 Path 对象
+        '''
         cache_path = (p if p.is_file() else Path(self.label_files[0]).parent).with_suffix(".cache")
         try:
             cache, exists = np.load(cache_path, allow_pickle=True).item(), True  # load dict
+            #! 如果直接看这里，可能不太好理解，所以最好从其创建过程 cache_labels 函数开始看
             assert cache["version"] == self.cache_version  # matches current version
             assert cache["hash"] == get_hash(self.label_files + self.im_files)  # identical hash
         except Exception:
@@ -643,15 +653,18 @@ class LoadImagesAndLabels(Dataset):
 
         # Display cache
         nf, nm, ne, nc, n = cache.pop("results")  # found, missing, empty, corrupt, total
-        if exists and LOCAL_RANK in {-1, 0}:
+        # 从缓存字典中取出并移除 "results" 键对应的值
+        if exists and LOCAL_RANK in {-1, 0}: # 仅主进程显示（分布式训练时）
             d = f"Scanning {cache_path}... {nf} images, {nm + ne} backgrounds, {nc} corrupt"
             tqdm(None, desc=prefix + d, total=n, initial=n, bar_format=TQDM_BAR_FORMAT)  # display cache results
             if cache["msgs"]:
                 LOGGER.info("\n".join(cache["msgs"]))  # display warnings
         assert nf > 0 or not augment, f"{prefix}No labels found in {cache_path}, can not start training. {HELP_URL}"
+        # 当训练模式但无有效标签时触发
 
         # Read cache
         [cache.pop(k) for k in ("hash", "version", "msgs")]  # remove items
+        # 移除已使用的元数据键：hash、version、msgs
         labels, shapes, self.segments = zip(*cache.values())
         nl = len(np.concatenate(labels, 0))  # number of labels
         assert nl > 0 or not augment, f"{prefix}All labels empty in {cache_path}, can not start training. {HELP_URL}"
@@ -662,12 +675,25 @@ class LoadImagesAndLabels(Dataset):
 
         # Filter images
         if min_items:
+            # 创建布尔数组，标记包含足够目标的图像
             include = np.array([len(x) >= min_items for x in self.labels]).nonzero()[0].astype(int)
+            # [len(x) >= min_items for x in self.labels]: 检查每个图像的标签数量是否≥min_items
+            # np.array(...).nonzero()[0]: 获取满足条件的图像索引
+
+            # 记录过滤日志：显示被过滤的图像数量
             LOGGER.info(f"{prefix}{n - len(include)}/{n} images filtered from dataset")
+            # prefix：日志前缀（如训练/验证阶段标识）
+            # n：原始图像总数，len(include): 保留的图像数
+
+            # 更新图像文件列表: 仅保留满足条件的图像
             self.im_files = [self.im_files[i] for i in include]
+            # 更新标签文件列表: 仅保留满足条件的标签文件
             self.label_files = [self.label_files[i] for i in include]
+            # 更新标签数据: 仅保留满足条件的标签
             self.labels = [self.labels[i] for i in include]
+            # 更新分割数据: 仅保留满足条件的分割标注
             self.segments = [self.segments[i] for i in include]
+            # 更新图像尺寸数据: 使用 NumPy 索引直接过滤数组
             self.shapes = self.shapes[include]  # wh
 
         # Create indices
@@ -675,11 +701,15 @@ class LoadImagesAndLabels(Dataset):
         bi = np.floor(np.arange(n) / batch_size).astype(int)  # batch index
         nb = bi[-1] + 1  # number of batches
         self.batch = bi  # batch index of image
-        self.n = n
-        self.indices = np.arange(n)
+        self.n = n # number of images
+        self.indices = np.arange(n) # # 创建 0 到 n-1 的原始索引数组
+        # 如果使用分布式训练 (rank 表示当前进程 ID)
         if rank > -1:  # DDP indices (see: SmartDistributedSampler)
             # force each rank (i.e. GPU process) to sample the same subset of data on every epoch
             self.indices = self.indices[np.random.RandomState(seed=seed).permutation(n) % WORLD_SIZE == RANK]
+            # np.random.RandomState(seed=seed): 使用固定种子的随机状态确保可复现性
+            # .permutation(n): 生成全局随机排列索引
+            # % WORLD_SIZE == RANK: 使用取模运算将数据分配给不同 GPU，只保留分配给当前进程的数据索引
 
         # Update labels
         include_class = []  # filter labels to include only these classes (optional)
@@ -764,13 +794,15 @@ class LoadImagesAndLabels(Dataset):
         x = {}  # dict
         nm, nf, ne, nc, msgs = 0, 0, 0, 0, []  # number missing, found, empty, corrupt, messages
         desc = f"{prefix}Scanning {path.parent / path.stem}..."
-        with Pool(NUM_THREADS) as pool:
+        with Pool(NUM_THREADS) as pool: # 使用线程池（线程数由 NUM_THREADS 决定）
             pbar = tqdm(
                 pool.imap(verify_image_label, zip(self.im_files, self.label_files, repeat(prefix))),
                 desc=desc,
                 total=len(self.im_files),
                 bar_format=TQDM_BAR_FORMAT,
             )
+            # itertools.repeat(): Python 标准库 itertools 模块中的一个函数，用于创建返回相同值的迭代器
+            # zip(): Python 标准库中的一个函数，用于将可迭代的对象作为参数，将对象中对应的元素打包成一个个元组，然后返回由这些元组组成的列表
             for im_file, lb, shape, segments, nm_f, nf_f, ne_f, nc_f, msg in pbar:
                 nm += nm_f
                 nf += nf_f
@@ -1181,14 +1213,19 @@ def verify_image_label(args):
         # verify images
         im = Image.open(im_file)
         im.verify()  # PIL verify
+        # Pillow (PIL) 库提供的图像文件完整性检查方法，用于在不加载像素数据的情况下快速验证图像文件是否结构完整、格式正确且无潜在安全风险，防止训练过程中因损坏或恶意图像导致意外中断
         shape = exif_size(im)  # image size
+        # 获取图像的原始尺寸（宽高），同时考虑 EXIF 方向信息，确保返回的尺寸是图像在正确方向上的实际显示尺寸
         assert (shape[0] > 9) & (shape[1] > 9), f"image size {shape} <10 pixels"
+        # 确保图像的两个维度（宽和高）都大于9像素，防止处理无效或损坏的超小图像
         assert im.format.lower() in IMG_FORMATS, f"invalid image format {im.format}"
         if im.format.lower() in ("jpg", "jpeg"):
             with open(im_file, "rb") as f:
-                f.seek(-2, 2)
+                f.seek(-2, 2) # 移动到文件末尾前2字节
                 if f.read() != b"\xff\xd9":  # corrupt JPEG
+                    # ImageOps.exif_transpose()：应用 EXIF 方向校正
                     ImageOps.exif_transpose(Image.open(im_file)).save(im_file, "JPEG", subsampling=0, quality=100)
+                    # subsampling=0：禁用色度子采样（最高质量）
                     msg = f"{prefix}WARNING ⚠️ {im_file}: corrupt JPEG restored and saved"
 
         # verify labels
@@ -1197,7 +1234,7 @@ def verify_image_label(args):
             with open(lb_file) as f:
                 lb = [x.split() for x in f.read().strip().splitlines() if len(x)]
                 if any(len(x) > 6 for x in lb):  # is segment
-                    classes = np.array([x[0] for x in lb], dtype=np.float32)
+                    classes = np.array([x[0] for x in lb], dtype=np.float32) # 获取所有标注的类别索引
                     segments = [np.array(x[1:], dtype=np.float32).reshape(-1, 2) for x in lb]  # (cls, xy1...)
                     lb = np.concatenate((classes.reshape(-1, 1), segments2boxes(segments)), 1)  # (cls, xywh)
                 lb = np.array(lb, dtype=np.float32)

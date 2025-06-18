@@ -286,7 +286,7 @@ def run(
         #? model.fp16 表示模型是否支持 FP16 计算。如果模型支持 FP16，则 half 变量将被设置为 True，否则将被设置为 False
         #! FP16 计算仅在某些后端（backend）上支持，并且需要 CUDA（一种 NVIDIA 的并行计算平台）。
         if engine:
-            #? 优化引擎（如 TensorRT）：batch_size 需在导出时预先设定，推理时不可动态修改
+            #? 优化引擎 (如 TensorRT): batch_size 需在导出时预先设定，推理时不可动态修改
             batch_size = model.batch_size
         else:
             device = model.device #! 这里返回的可能是什么类型？
@@ -310,7 +310,7 @@ def run(
     #! 如果 single_cls 为 True，则 nc 为 1，否则 nc 为 data["nc"] 的值
     iouv = torch.linspace(0.5, 0.95, 10, device=device)  # iou vector for mAP@0.5:0.95
     #! [0.5000, 0.5500, 0.6000, 0.6500, 0.7000, 0.7500, 0.8000, 0.8500, 0.9000, 0.9500]
-    #! COCO数据集的评估标准，要求模型在IoU阈值从0.5到0.95（步长0.05）的范围内均表现良好
+    #! COCO 数据集的评估标准，要求模型在 IoU 阈值从 0.5 到 0.95 (步长 0.05) 的范围内均表现良好
     niou = iouv.numel() # 10
 
     # Dataloader
@@ -352,13 +352,13 @@ def run(
     # get class names
     names = model.names if hasattr(model, "names") else model.module.names
     #? 兼容两种常见场景：
-    #? 单设备（如单 GPU 或 CPU）模型：直接访问 model.names。
-    #? 多设备（如多 GPU DataParallel 或分布式 DistributedDataParallel）模型：通过 model.module.names 访问。
+    #? 单设备 (如单 GPU 或 CPU) 模型：直接访问 model.names
+    #? 多设备 (如多 GPU DataParallel 或分布式 DistributedDataParallel) 模型：通过 model.module.names 访问
     if isinstance(names, (list, tuple)):  # old format
         names = dict(enumerate(names))
 
     class_map = coco80_to_coco91_class() if is_coco else list(range(1000))
-    #? 将YOLO训练时使用的80个类别索引映射回COCO官方91个类别的原始ID: COCO数据集实际有91个类别，但部分类别因样本少被合并，训练时仅用80类。此函数确保评估结果与官方类别ID对齐
+    #? 将 YOLO 训练时使用的 80 个类别索引映射回 COCO 官方 91 个类别的原始 ID: COCO 数据集实际有 91 个类别，但部分类别因样本少被合并，训练时仅用 80 类。此函数确保评估结果与官方类别 ID 对齐
 
     tp, fp, p, r, f1, mp, mr, map50, ap50, map = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
     #? tp: true positive
@@ -403,15 +403,17 @@ def run(
 
         # Inference
         with dt[1]: #? 记录本批次模型推理耗时
+            #! compute_loss=None 时，启用数据增强（如测试时增强 TTA），但仅返回预测结果 preds
             #? compute_loss: 是否保留训练输出（用于损失计算）
             #? augment: 推理时应用数据增强（如多尺度/翻转）
-            preds, train_out = model(im) if compute_loss else (model(im, augment=augment), None)
-            #! 模型本批次输出结果的 shape 为 (batch_size, anchor_num, 5+mask_param_num+class_num)
-            #! 其中 5 对应 (x_center, y_center, width, height, obj_confidence)
             #? model(im): PyTorch 的语法糖，自动触发前向传播
-            #? preds：模型的预测结果（边界框、类别、置信度）
+            #? preds：模型的预测结果（边界框、类别、置信度）,
             #? train_out：训练所需的中间输出（如各层特征），用于后续损失计算
-            #! compute_loss=False 时，启用数据增强（如测试时增强，TTA），但仅返回预测结果 preds
+            preds, train_out = model(im) if compute_loss else (model(im, augment=augment), None)
+            #! preds[0]: 模型本批次输出结果, shape 为 (batch_size, anchor_num_sum, 5+mask_param_num+class_num)
+            #! 其中 5 对应 (x_center, y_center, width, height, obj_confidence)
+            #! preds[1]: 包含各特征层输出的列表, 每层输出的 shape 为 (batch_size, anchor_num, feature_map_height, feature_map_width, 5+mask_param_num+class_num)
+            #! anchor_num_sum=\sum{anchor_num*feature_map_height*feature_map_width}
 
         # Loss
         if compute_loss:
@@ -419,7 +421,7 @@ def run(
             loss += compute_loss(train_out, targets)[1]  # box, obj, cls
 
         targets[:, 2:] *= torch.tensor((width, height, width, height), device=device)  # to pixels
-        #? targets 的格式为 [image_index, class_id, x_center, y_center, width, height]，其中坐标是归一化的（范围[0,1]），乘以图像的宽（width）和高（height），将归一化坐标转换为实际像素值
+        #? targets 的格式为 [image_index, class_id, x_center, y_center, width, height]，其中坐标是归一化的，范围 [0,1]，乘以图像的宽（width）和高（height），将归一化坐标转换为实际像素值
         lb = [targets[targets[:, 0] == i, 1:] for i in range(nb)] if save_hybrid else []  # for autolabelling
         #? save_hybrid: 控制是否启用混合模式（如同时使用标注数据和自动生成标签）
         #? targets[:, 0] == i: 用于获取第 i 张图上的所有 targets
@@ -432,7 +434,7 @@ def run(
                 preds, conf_thres, iou_thres, labels=lb, multi_label=True, agnostic=single_cls, max_det=max_det
             )
             #! multi_label=True: 单个框可以预测多个类别标签
-            #! agnostic=single_cls: 若为True，则跨类别进行NMS（适用于单类别任务）
+            #! agnostic=single_cls: 若为 True，则跨类别进行 NMS（适用于单类别任务）
             #! max_det: 每个图像最多保留的预测框数
             #! 返回值 preds 为长度为 batch_size 的列表，每个元素的 shape 为 (max_det, 6): 其中 6 对应 (x1, y1, x2, y2, conf, cls)
 
@@ -449,14 +451,14 @@ def run(
             #? path: 第 si 张图的路径
             #? shape: 第 si 张图的原始尺寸
             correct = torch.zeros(npr, niou, dtype=torch.bool, device=device)  # init
-            #? correct[i, j] = True 表示第 i 个预测框在IoU阈值 iouv[j] 下正确匹配某真实框
+            #? correct[i, j] = True 表示第 i 个预测框在 IoU 阈值 iouv[j] 下正确匹配某真实框
             #? 若预测框与某真实框的 IoU > 阈值 且类别正确，标记对应位置为 True
             seen += 1 #? 已处理图像计数+1
 
-            if npr == 0: #? 所有预测框的置信度低于阈值或在NMS中被过滤，导致无有效检测结果
+            if npr == 0: #? 所有预测框的置信度低于阈值或在 NMS 中被过滤，导致无有效检测结果
                 if nl: #? 若存在真实目标但无预测框，需记录漏检信息
                     stats.append((correct, *torch.zeros((2, 0), device=device), labels[:, 0]))
-                    #? labels[:, 0]：真实标签的类别ID（用于统计各类别的漏检情况）
+                    #? labels[:, 0]：真实标签的类别 ID（用于统计各类别的漏检情况）
                     if plots:
                         confusion_matrix.process_batch(detections=None, labels=labels[:, 0])
                         #? detections=None 表示无预测框，labels 提供真实类别
@@ -466,10 +468,10 @@ def run(
 
             # Predictions
             if single_cls:
-                #! 当启用单类别模式（single_cls=True）时，将所有预测框的类别ID强制设为 0
+                #! 当启用单类别模式 (single_cls=True) 时，将所有预测框的类别 ID 强制设为 0
                 pred[:, 5] = 0
             predn = pred.clone()
-            #! 将预测框坐标从 模型输入空间（如填充后的640x640）映射回 原始图像空间（如1280x720），考虑可能的缩放和填充
+            #! 将预测框坐标从 模型输入空间（如填充后的 640x640）映射回 原始图像空间（如 1280x720），考虑可能的缩放和填充
             scale_boxes(im[si].shape[1:], predn[:, :4], shape, shapes[si][1])  # native-space pred
             #? im[si].shape[1:]：模型输入图像的尺寸（如 (640, 640)），即预处理后的尺寸
             #? predn[:, :4]：待转换的预测框坐标（x1, y1, x2, y2），归一化到输入图像尺寸

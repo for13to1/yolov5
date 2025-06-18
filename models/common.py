@@ -719,12 +719,15 @@ class DetectMultiBackend(nn.Module):
             im = im.permute(0, 2, 3, 1)  # torch BCHW to numpy BHWC shape(1,320,192,3)
 
         if self.pt:  # PyTorch
-            y = self.model(im, augment=augment, visualize=visualize) if augment or visualize else self.model(im)
-            #! 模型本批次输出结果的 shape 为 (batch_size, anchor_num, 5+mask_param_num+class_num)
-            #! y 可能为 tuple: 其中 y[1] 为各特征层输出
             #! 如果 augment 或 visualize 参数为 True，调用 self.model(im, augment=augment, visualize=visualize) 方法，否则调用 self.model(im) 方法
             #! augment: 启用 多尺度/翻转/裁剪 等数据增强策略，在推理阶段生成多样化的预测结果，提升模型鲁棒性
             #! visualize: 激活模型的中间特征图保存功能，用于可视化卷积层或检测头的输出
+            y = self.model(im, augment=augment, visualize=visualize) if augment or visualize else self.model(im)
+            #! y 可能为 tuple:
+            #! y[0]: 模型本批次输出结果, shape 为 (batch_size, anchor_num_sum, 5+mask_param_num+class_num)
+            #! y[1]: 为包含各特征层输出的列表, 每层输出的 shape 为 (batch_size, anchor_num, feature_map_height, feature_map_width, 5+mask_param_num+class_num)
+            #! anchor_num_sum=\sum{anchor_num*feature_map_height*feature_map_width}
+
         elif self.jit:  # TorchScript
             y = self.model(im)
         elif self.dnn:  # ONNX OpenCV DNN
@@ -796,8 +799,8 @@ class DetectMultiBackend(nn.Module):
 
         if isinstance(y, (list, tuple)): #! 多输出模型处理
             return self.from_numpy(y[0]) if len(y) == 1 else [self.from_numpy(x) for x in y]
-            #! y[0]) if len(y) == 1: 某些框架（如ONNX）即使模型只有1个输出，也强制返回列表
-            #! [self.from_numpy(x) for x in y]: 遍历每个输出，逐个转换为PyTorch张量，保持列表结构（如 [detections, proto]）
+            #! y[0]) if len(y) == 1: 某些框架（如 ONNX）即使模型只有 1 个输出，也强制返回列表
+            #! [self.from_numpy(x) for x in y]: 遍历每个输出，逐个转换为 PyTorch 张量，保持列表结构（如 [detections, proto]）
         else:
             return self.from_numpy(y)
 
@@ -813,7 +816,7 @@ class DetectMultiBackend(nn.Module):
         #! gpu_warmup_types = self.pt, self.jit, self.onnx, self.engine, self.saved_model, self.pb
         #! if (any(gpu_warmup_types) and self.device.type != "cpu") or self.triton:
         if any(warmup_types) and (self.device.type != "cpu" or self.triton):
-            #! 空张量凭借其高效的内存分配特性，在预热、内存预分配、占位符、性能测试等场景中非常有用。但使用时需牢记：它仅负责分配内存，不保证数据有效性，正式计算前应显式填充或初始化数据。
+            #! 空张量凭借其高效的内存分配特性，在预热、内存预分配、占位符、性能测试等场景中非常有用。但使用时需牢记：它仅负责分配内存，不保证数据有效性，正式计算前应显式填充或初始化数据
             im = torch.empty(*imgsz, dtype=torch.half if self.fp16 else torch.float, device=self.device)  # input
             #! FP16 计算需要特定的硬件支持（如 NVIDIA 的 Tensor Cores）
             for _ in range(2 if self.jit else 1):
